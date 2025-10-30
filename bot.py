@@ -11,7 +11,7 @@ from telegram.ext import (
 from pymongo import MongoClient
 
 # === CONFIGURATION (Apna data yahan change karein) ===
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN" 
+BOT_TOKEN = "BOT_TOKEN" 
 MONGO_URI = "YOUR_MONGO_CONNECTION_STRING" 
 # Database aur Collection ka naam
 DATABASE_NAME = 'datingbot_db'
