@@ -1,0 +1,42 @@
+{
+  "name": "Michi Dating Bot",
+  "description": "A Python Telegram Dating Bot similar to Michelangelo Bot.",
+  "keywords": [
+    "telegram",
+    "bot",
+    "dating",
+    "python",
+    "heroku"
+  ],
+  "website": "https://github.com/STD-DEEPANSHU/Dating",
+  "repository": "https://github.com/STD-DEEPANSHU/Dating",
+  "success_url": "/start",
+  "stack": "heroku-22",
+  
+  "env": {
+    "BOT_TOKEN": {
+      "description": "The Telegram Bot API Token obtained from BotFather.",
+      "required": true
+    },
+    "MONGO_URI": {
+      "description": "The connection string for your MongoDB database (e.g., MongoDB Atlas URI).",
+      "required": true
+    },
+    "DATABASE_NAME": {
+      "description": "The name of your MongoDB database (e.g., datingbot_db).",
+      "value": "datingbot_db",
+      "required": false
+    }
+  },
+  
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  
+  "scripts": {
+    "postdeploy": "echo 'Bot Deployment Complete! Check your Telegram bot.'"
+  }
+}
