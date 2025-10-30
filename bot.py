@@ -3,7 +3,7 @@ from pyrogram.types import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyb
 import json
 from db import load_users, save_users, load_chats, save_chats
 
-API_ID = int("YOUR_API_ID")
+API_ID = int("22705233")
 API_HASH = "YOUR_API_HASH"
 BOT_TOKEN = "YOUR_BOT_TOKEN"
 
