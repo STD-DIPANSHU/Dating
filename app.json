@@ -1,0 +1,31 @@
+{
+  "name": "STD Dating Bot",
+  "description": "An AI-powered Telegram Dating Bot made with Python + Aiogram.",
+  "repository": "https://github.com/yourusername/std-dating-bot-v2",
+  "keywords": [
+    "telegram",
+    "dating",
+    "aiogram",
+    "python",
+    "bot"
+  ],
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "env": {
+    "TELEGRAM_BOT_TOKEN": {
+      "description": "Your Telegram Bot Token from @BotFather",
+      "required": true
+    },
+    "MODE": {
+      "description": "polling or webhook",
+      "value": "polling"
+    },
+    "PORT": {
+      "description": "Port for web server",
+      "value": "8000"
+    }
+  }
+}
