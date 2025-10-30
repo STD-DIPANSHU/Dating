@@ -1,165 +1,142 @@
-import os
-import asyncio
+import logging
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.enums import ParseMode
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils import executor
+import asyncio
+import os
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+from db import (
+    save_user,
+    get_user,
+    update_user,
+)
 
-bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher()
+# -------------------
+# Bot Setup
+# -------------------
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(bot)
 
-# In-memory database (for demo)
+logging.basicConfig(level=logging.INFO)
 users = {}
-likes = {}
 
-
-# ----- Start Command -----
-@dp.message(Command("start"))
+# -------------------
+# Start Command
+# -------------------
+@dp.message_handler(commands=['start'])
 async def start_command(message: types.Message):
     user_id = message.from_user.id
     users[user_id] = {"step": "ask_gender"}
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text='Male', callback_data='gender:Male'),
-            InlineKeyboardButton(text='Female', callback_data='gender:Female'),
-            InlineKeyboardButton(text='Other', callback_data='gender:Other')
-        ]
+    gender_markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("Male", callback_data="gender:Male"),
+         InlineKeyboardButton("Female", callback_data="gender:Female")]
     ])
 
-    await message.answer(
-        "👋 Welcome to STD Dating Bot!\n\nPlease select your gender:",
-        reply_markup=kb
-    )
+    await message.answer("Welcome to STD Dating Bot ❤️\nSelect your gender:", reply_markup=gender_markup)
 
-
-# ----- Handle Gender -----
-@dp.callback_query(lambda c: c.data.startswith('gender:'))
+# -------------------
+# Handle Gender Selection
+# -------------------
+@dp.callback_query_handler(lambda c: c.data.startswith('gender:'))
 async def process_gender(callback_query: types.CallbackQuery):
-    gender = callback_query.data.split(':')[1]
     user_id = callback_query.from_user.id
+    gender = callback_query.data.split(':')[1]
+
+    # ✅ Prevent KeyError if user presses gender without /start
+    if user_id not in users:
+        users[user_id] = {}
+
     users[user_id]["gender"] = gender
     users[user_id]["step"] = "ask_name"
 
     await callback_query.message.edit_text("What's your name?")
     await callback_query.answer()
 
-
-# ----- Handle Name -----
-@dp.message(lambda msg: users.get(msg.from_user.id, {}).get("step") == "ask_name")
-async def process_name(message: types.Message):
+# -------------------
+# Handle Messages (Name, Age, Bio)
+# -------------------
+@dp.message_handler(lambda message: True)
+async def handle_messages(message: types.Message):
     user_id = message.from_user.id
-    users[user_id]["name"] = message.text
-    users[user_id]["step"] = "ask_age"
 
-    await message.answer("How old are you?")
+    if user_id not in users:
+        await message.answer("Please start with /start 😊")
+        return
 
+    step = users[user_id].get("step")
 
-# ----- Handle Age -----
-@dp.message(lambda msg: users.get(msg.from_user.id, {}).get("step") == "ask_age")
-async def process_age(message: types.Message):
+    if step == "ask_name":
+        users[user_id]["name"] = message.text
+        users[user_id]["step"] = "ask_age"
+        await message.answer("Nice! Now tell me your age 👀")
+
+    elif step == "ask_age":
+        if not message.text.isdigit():
+            await message.answer("Please enter a valid number 🔢")
+            return
+        users[user_id]["age"] = int(message.text)
+        users[user_id]["step"] = "ask_bio"
+        await message.answer("Cool! Now write a short bio ✍️")
+
+    elif step == "ask_bio":
+        users[user_id]["bio"] = message.text
+        users[user_id]["step"] = "complete"
+
+        # Save user to database
+        save_user(user_id, users[user_id])
+
+        await message.answer(
+            f"Profile created successfully ✅\n\n"
+            f"👤 Name: {users[user_id]['name']}\n"
+            f"⚧ Gender: {users[user_id]['gender']}\n"
+            f"🎂 Age: {users[user_id]['age']}\n"
+            f"💬 Bio: {users[user_id]['bio']}\n\n"
+            f"Type /match to find new people 💕"
+        )
+
+    else:
+        await message.answer("You're all set! Type /match to find a date 💘")
+
+# -------------------
+# Match Command
+# -------------------
+@dp.message_handler(commands=['match'])
+async def match_command(message: types.Message):
     user_id = message.from_user.id
+    user = get_user(user_id)
+
+    if not user:
+        await message.answer("Please complete your profile first using /start 😊")
+        return
+
+    # Get a random match (for now, a placeholder)
+    other_user = get_user("random")
+
+    if not other_user:
+        await message.answer("No matches found yet 😢 Try again later.")
+        return
+
+    await message.answer(
+        f"💞 You matched with {other_user['name']}!\n"
+        f"Age: {other_user['age']}\n"
+        f"Bio: {other_user['bio']}"
+    )
+
+# -------------------
+# Run Bot
+# -------------------
+if __name__ == "__main__":
+    logging.info("STD Dating Bot started successfully 🚀")
 
     try:
-        age = int(message.text)
-    except ValueError:
-        await message.answer("Please enter a valid number for age.")
-        return
-
-    users[user_id]["age"] = age
-    users[user_id]["step"] = "profile_done"
-
-    await message.answer("Your profile has been created ✅", reply_markup=profile_keyboard())
-
-
-# ----- Profile Menu -----
-def profile_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='🔍 Search Profiles', callback_data='search')],
-        [InlineKeyboardButton(text='ℹ️ My Profile', callback_data='myprofile')]
-    ])
-
-
-# ----- Show My Profile -----
-@dp.callback_query(lambda c: c.data == 'myprofile')
-async def my_profile(callback_query: types.CallbackQuery):
-    user = users.get(callback_query.from_user.id)
-    if not user:
-        await callback_query.answer("No profile found! Use /start again.")
-        return
-
-    text = (
-        f"<b>👤 Name:</b> {user['name']}\n"
-        f"<b>🚻 Gender:</b> {user['gender']}\n"
-        f"<b>🎂 Age:</b> {user['age']}"
-    )
-    await callback_query.message.edit_text(text, reply_markup=profile_keyboard())
-    await callback_query.answer()
-
-
-# ----- Search Profiles -----
-@dp.callback_query(lambda c: c.data == 'search')
-async def search_profiles(callback_query: types.CallbackQuery):
-    user_id = callback_query.from_user.id
-    all_users = [uid for uid in users.keys() if uid != user_id]
-
-    if not all_users:
-        await callback_query.answer("No other profiles yet 😅")
-        return
-
-    target_id = all_users[0]
-    target = users[target_id]
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text='❤️ Like', callback_data=f'like:{target_id}'),
-            InlineKeyboardButton(text='👎 Dislike', callback_data=f'dislike:{target_id}'),
-            InlineKeyboardButton(text='🔁 Next', callback_data=f'next:{target_id}')
-        ]
-    ])
-
-    text = (
-        f"<b>👤 Name:</b> {target['name']}\n"
-        f"<b>🚻 Gender:</b> {target['gender']}\n"
-        f"<b>🎂 Age:</b> {target['age']}"
-    )
-    await callback_query.message.edit_text(text, reply_markup=kb)
-    await callback_query.answer()
-
-
-# ----- Handle Likes -----
-@dp.callback_query(lambda c: c.data.startswith('like:'))
-async def handle_like(callback_query: types.CallbackQuery):
-    liker = callback_query.from_user.id
-    liked = int(callback_query.data.split(':')[1])
-
-    if liked not in likes:
-        likes[liked] = set()
-    likes[liked].add(liker)
-
-    await callback_query.answer("You liked this profile ❤️")
-
-
-# ----- Handle Dislike -----
-@dp.callback_query(lambda c: c.data.startswith('dislike:'))
-async def handle_dislike(callback_query: types.CallbackQuery):
-    await callback_query.answer("You disliked this profile 👎")
-
-
-# ----- Handle Next -----
-@dp.callback_query(lambda c: c.data.startswith('next:'))
-async def handle_next(callback_query: types.CallbackQuery):
-    await search_profiles(callback_query)
-
-
-# ----- Run Bot -----
-async def main():
-    print("STD Dating Bot started successfully 🚀")
-    await dp.start_polling(bot)
-
-
-if __name__ == '__main__':
-    asyncio.run(main())
+        # ✅ Polling wrapped in safe retry loop to avoid conflict errors
+        while True:
+            try:
+                executor.start_polling(dp, skip_updates=True)
+            except Exception as e:
+                logging.error(f"Polling error: {e}")
+                asyncio.sleep(2)
+    except KeyboardInterrupt:
+        logging.info("Bot stopped manually.")
