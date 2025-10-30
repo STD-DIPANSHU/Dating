@@ -1,0 +1,3 @@
+python-telegram-bot
+pymongo                # MongoDB के लिए
+dnspython              # MongoDB कनेक्शन के लिए (अगर ज़रूरत हो)
