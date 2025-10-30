@@ -1,5 +1,2 @@
-aiogram==3.0.0b7
-aiosqlite
-python-dotenv
-gunicorn
-uvicorn
+pyrogram==2.0.106
+tgcrypto==1.2.5
