@@ -1,88 +1,98 @@
 import os
 from pymongo import MongoClient
-from bson import ObjectId
-import random
+from typing import Optional, List, Dict, Any
 
-# ----------------------
-# MongoDB Connection
-# ----------------------
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
-    raise RuntimeError("Set MONGO_URI environment variable for MongoDB connection.")
+    raise RuntimeError("Set MONGO_URI env var")
 
 client = MongoClient(MONGO_URI)
 db = client["std_dating_bot"]
-users = db["users"]
-likes = db["likes"]
+users = db["users"]          # documents keyed by user_id
+likes = db["likes"]          # documents: { user_id: X, target_id: Y }
+who_likes = db["who_likes"]  # optional: quick lookup
 
-# ----------------------
-# Save or update a user profile
-# ----------------------
-def save_user(user_id: int, name: str, gender: str, age: int, bio: str, photos):
-    """Insert or update a user's profile"""
-    if not isinstance(photos, list):
-        photos = [photos] if photos else []
-
+# Save or update full user profile
+def save_user(user_id: int,
+              name: Optional[str],
+              gender: Optional[str],
+              age: Optional[int],
+              bio: Optional[str],
+              photos: Optional[List[str]],
+              city: Optional[str] = None,
+              preference: Optional[str] = None,
+              hobbies: Optional[List[str]] = None):
+    if photos is None:
+        photos = []
+    if hobbies is None:
+        hobbies = []
     users.update_one(
         {"user_id": user_id},
-        {
-            "$set": {
-                "user_id": user_id,
-                "name": name,
-                "gender": gender,
-                "age": age,
-                "bio": bio,
-                "photos": photos,
-            }
-        },
+        {"$set": {
+            "user_id": user_id,
+            "name": name,
+            "gender": gender,
+            "age": age,
+            "bio": bio,
+            "photos": photos,
+            "city": city,
+            "preference": preference,
+            "hobbies": hobbies
+        }},
         upsert=True
     )
 
-# ----------------------
-# Get user by ID
-# ----------------------
-def get_user(user_id: int):
-    return users.find_one({"user_id": user_id})
+def get_user(user_id: int) -> Optional[Dict[str, Any]]:
+    doc = users.find_one({"user_id": user_id})
+    return doc
 
-# ----------------------
-# Find random user (exclude self)
-# ----------------------
-def get_random_user(current_user_id: int):
-    pipeline = [
-        {"$match": {"user_id": {"$ne": current_user_id}}},
-        {"$sample": {"size": 1}}
-    ]
-    result = list(users.aggregate(pipeline))
-    if not result:
+# update partial (convenience)
+def update_user_partial(user_id: int, patch: Dict[str, Any]):
+    users.update_one({"user_id": user_id}, {"$set": patch}, upsert=True)
+
+# Find random profile according to preference & excluding already liked ones
+def find_random_profile(current_user_id: int) -> Optional[Dict[str, Any]]:
+    cur = get_user(current_user_id)
+    if not cur:
         return None
-    return result[0]
+    pref = cur.get("preference", "Everyone")
+    # build filter
+    flt = {"user_id": {"$ne": current_user_id}}
+    if pref == "Boys":
+        flt["gender"] = "Boy"
+    elif pref == "Girls":
+        flt["gender"] = "Girl"
+    # Exclude users already liked by current_user
+    liked = [d["target_id"] for d in likes.find({"user_id": current_user_id})]
+    if liked:
+        flt["user_id"] = {"$ne": current_user_id, "$nin": liked}
+    # sample one
+    res = list(users.aggregate([{"$match": flt}, {"$sample": {"size": 1}}]))
+    if not res:
+        return None
+    return res[0]
 
-# ----------------------
-# Record a like
-# ----------------------
-def like_user(liker_id: int, liked_id: int):
-    likes.update_one(
-        {"liker_id": liker_id, "liked_id": liked_id},
-        {"$set": {"liker_id": liker_id, "liked_id": liked_id}},
-        upsert=True
-    )
+# record a like
+def like_user(user_id: int, target_id: int):
+    likes.update_one({"user_id": user_id, "target_id": target_id},
+                     {"$set": {"user_id": user_id, "target_id": target_id}}, upsert=True)
 
-# ----------------------
-# Check if two users liked each other (match)
-# ----------------------
-def is_match(user1: int, user2: int) -> bool:
-    """Returns True if both liked each other"""
-    return (
-        likes.find_one({"liker_id": user1, "liked_id": user2}) is not None and
-        likes.find_one({"liker_id": user2, "liked_id": user1}) is not None
-    )
+# who liked me list (reads likes collection)
+def list_who_liked_me(user_id: int) -> List[Dict[str, Any]]:
+    docs = likes.find({"target_id": user_id})
+    out = []
+    for d in docs:
+        u = get_user(d["user_id"])
+        if u:
+            out.append({"user_id": d["user_id"], "name": u.get("name")})
+    return out
 
-# ----------------------
-# Debug utility (optional)
-# ----------------------
-def all_users():
-    return list(users.find({}))
+# optional helper to record reverse quick lookup
+def record_who_liked(user_id: int, liker_id: int):
+    # also keep a separate small collection for faster "who liked me" queries if needed
+    who_likes.update_one({"user_id": user_id, "liker_id": liker_id},
+                         {"$set": {"user_id": user_id, "liker_id": liker_id}}, upsert=True)
 
-def clear_all():
-    users.delete_many({})
-    likes.delete_many({})
+# check mutual like
+def check_match(user1: int, user2: int) -> bool:
+    return likes.find_one({"user_id": user2, "target_id": user1}) is not None
