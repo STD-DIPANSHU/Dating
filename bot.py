@@ -1,157 +1,147 @@
 import os
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from db import save_user, get_user, get_random_user, like_user, is_match
 
-# Environment variables
+# ========= BOT CONFIG =========
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Pyrogram client
-app = Client("dating_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("dating-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Store chat matches (active anonymous chats)
-active_chats = {}
+# ========= COMMAND HANDLERS =========
 
-# Start command
 @app.on_message(filters.command("start"))
-async def start(_, message):
-    user = get_user(message.from_user.id)
-    if user:
-        await message.reply_text(
-            f"👋 Welcome back, {user['name']}!\n\nUse /find to discover new people ❤️",
-        )
-    else:
-        await message.reply_text(
-            "👋 Welcome to *STD Dating Bot!*\nLet's create your profile first.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Create Profile 💘", callback_data="create_profile")]
-            ])
-        )
-
-# Handle create profile button
-@app.on_callback_query(filters.regex("create_profile"))
-async def ask_name(_, query):
-    await query.message.reply_text("What's your name?")
-    app.set_parse_mode("private")
-    app.set_parse_mode("creating_name", query.from_user.id)
-
-# Store name
-@app.on_message(filters.private & ~filters.command(["start", "find"]))
-async def get_name(_, message):
-    user_state = app.get_parse_mode("private")
-    if user_state == "creating_name":
-        app.set_parse_mode("creating_gender", message.from_user.id)
-        app.set_parse_mode("name", message.text)
-        await message.reply_text(
-            "Select your gender:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Male ♂️", callback_data="gender_male")],
-                [InlineKeyboardButton("Female ♀️", callback_data="gender_female")]
-            ])
-        )
-
-# Handle gender selection
-@app.on_callback_query(filters.regex("gender_"))
-async def ask_age(_, query):
-    gender = query.data.split("_")[1]
-    app.set_parse_mode("gender", gender)
-    app.set_parse_mode("creating_age", query.from_user.id)
-    await query.message.reply_text("Enter your age:")
-
-# Store age
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "find"]))
-async def get_age(_, message):
-    user_state = app.get_parse_mode("private")
-    if user_state == "creating_age":
-        try:
-            age = int(message.text)
-            app.set_parse_mode("age", age)
-            app.set_parse_mode("creating_bio", message.from_user.id)
-            await message.reply_text("Tell us something about yourself 💬:")
-        except ValueError:
-            await message.reply_text("❌ Please enter a valid number for age!")
-
-# Store bio
-@app.on_message(filters.private & filters.text & ~filters.command(["start", "find"]))
-async def get_bio(_, message):
-    user_state = app.get_parse_mode("private")
-    if user_state == "creating_bio":
-        app.set_parse_mode("bio", message.text)
-        app.set_parse_mode("creating_photo", message.from_user.id)
-        await message.reply_text("Now send me your profile photo 📸:")
-
-# Store photo and complete registration
-@app.on_message(filters.private & filters.photo)
-async def get_photo(_, message):
-    user_state = app.get_parse_mode("private")
-    if user_state == "creating_photo":
-        photo = message.photo.file_id
-        name = app.get_parse_mode("name")
-        gender = app.get_parse_mode("gender")
-        age = app.get_parse_mode("age")
-        bio = app.get_parse_mode("bio")
-
-        save_user(message.from_user.id, name, gender, age, bio, photo)
-        await message.reply_text("✅ Profile created successfully!\nUse /find to start matching 💞")
-
-# Command: Find new people
-@app.on_message(filters.command("find"))
-async def find(_, message):
-    user = get_user(message.from_user.id)
-    if not user:
-        await message.reply_text("⚠️ Please create a profile first using /start.")
-        return
-
-    random_user = get_random_user(message.from_user.id)
-    if not random_user:
-        await message.reply_text("😕 No users found. Try again later!")
-        return
-
-    await message.reply_photo(
-        random_user["photo"],
-        caption=f"✨ *{random_user['name']}*, {random_user['age']} yrs\n\n_{random_user['bio']}_",
+async def start(_, msg):
+    await msg.reply_text(
+        f"👋 Hey {msg.from_user.first_name}!\n\n"
+        "Welcome to **STD Dating Bot ❤️**\n"
+        "Create your profile using /setprofile\n"
+        "Then start finding matches using /find",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❤️ Like", callback_data=f"like_{random_user['id']}")],
-            [InlineKeyboardButton("➡️ Next", callback_data="next_user")]
+            [InlineKeyboardButton("❤️ Set Profile", callback_data="set_profile")],
+            [InlineKeyboardButton("🔍 Find Match", callback_data="find_match")]
         ])
     )
 
-# Like handler
-@app.on_callback_query(filters.regex("^like_"))
-async def like_handler(_, query):
-    liked_id = int(query.data.split("_")[1])
+# ========= PROFILE CREATION =========
+
+@app.on_callback_query(filters.regex("set_profile"))
+async def ask_name(_, query):
+    await query.message.reply_text("👤 What's your name?")
+    await query.answer()
+    app.set_parse_mode("private")
+    app.set_parse_mode("user_name")
+
+@app.on_message(filters.text & filters.private)
+async def profile_flow(client, message):
+    user_id = message.from_user.id
+
+    if "user_name" in app.parse_mode:
+        name = message.text
+        app.parse_mode = {"user_name_done": name}
+        await message.reply_text("🚻 What's your gender? (Male/Female)")
+        return
+
+    if "user_name_done" in app.parse_mode:
+        gender = message.text.lower()
+        if gender not in ["male", "female"]:
+            await message.reply_text("❌ Please type either Male or Female.")
+            return
+        app.parse_mode = {"user_gender_done": gender}
+        await message.reply_text("🎂 How old are you?")
+        return
+
+    if "user_gender_done" in app.parse_mode:
+        try:
+            age = int(message.text)
+            if not (16 <= age <= 80):
+                raise ValueError
+        except ValueError:
+            await message.reply_text("⚠️ Please enter a valid age (16–80).")
+            return
+        app.parse_mode = {"user_age_done": age}
+        await message.reply_text("📝 Write a short bio about yourself.")
+        return
+
+    if "user_age_done" in app.parse_mode:
+        bio = message.text
+        app.parse_mode = {"user_bio_done": bio}
+        await message.reply_text("📸 Please send your photo.")
+        return
+
+    if "user_bio_done" in app.parse_mode and message.photo:
+        photo = message.photo.file_id
+        data = app.parse_mode
+        save_user(user_id, data["user_name_done"], data["user_gender_done"], data["user_age_done"], data["user_bio_done"], photo)
+        await message.reply_text("✅ Your profile has been saved successfully!")
+        app.parse_mode = None
+        return
+
+# ========= MATCHING SYSTEM =========
+
+@app.on_callback_query(filters.regex("find_match"))
+async def find_match_cb(_, query):
+    user_id = query.from_user.id
+    current_user = get_user(user_id)
+
+    if not current_user:
+        await query.message.reply_text("❌ You don't have a profile yet. Use /setprofile first.")
+        await query.answer()
+        return
+
+    user = get_random_user(user_id)
+    if not user:
+        await query.message.reply_text("😔 No more users found right now. Try again later!")
+        await query.answer()
+        return
+
+    caption = (
+        f"💫 **{user['name']}**, {user['age']}\n"
+        f"🧬 Gender: {user['gender'].capitalize()}\n\n"
+        f"🗒️ Bio: {user['bio']}"
+    )
+
+    await query.message.reply_photo(
+        user["photo"],
+        caption=caption,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❤️ Like", callback_data=f"like_{user['id']}"),
+             InlineKeyboardButton("💔 Skip", callback_data="find_match")]
+        ])
+    )
+    await query.answer()
+
+@app.on_callback_query(filters.regex(r"like_(\d+)"))
+async def like_user_cb(_, query):
     liker_id = query.from_user.id
+    liked_id = int(query.data.split("_")[1])
 
     like_user(liker_id, liked_id)
 
     if is_match(liker_id, liked_id):
-        # If both liked each other — start anonymous chat
-        active_chats[liker_id] = liked_id
-        active_chats[liked_id] = liker_id
-        await query.message.reply_text("💘 It's a Match! Starting anonymous chat...")
-
-        user1 = await app.get_users(liker_id)
-        user2 = await app.get_users(liked_id)
-
-        await app.send_message(liked_id, "💞 You both liked each other! Start chatting here (anonymous mode).")
-        await app.send_message(liker_id, "💞 You both liked each other! Start chatting here (anonymous mode).")
+        await query.message.reply_text(
+            f"🎉 It's a Match! ❤️\n"
+            f"You and [{liked_id}](tg://user?id={liked_id}) liked each other!\n\n"
+            "Start chatting anonymously!"
+        )
     else:
-        await query.message.reply_text("❤️ Liked! Wait to see if they like you back!")
+        await query.message.reply_text("❤️ Liked! Let's see if they like you back 😉")
 
-# Next button
-@app.on_callback_query(filters.regex("next_user"))
-async def next_user(_, query):
-    await find(_, query.message)
+    await query.answer("Liked!")
 
-# Anonymous chat forwarding
-@app.on_message(filters.private & filters.text)
-async def chat_forwarder(_, message):
-    if message.from_user.id in active_chats:
-        partner_id = active_chats[message.from_user.id]
-        await app.send_message(partner_id, f"🗣 {message.text}")
+# ========= ERROR HANDLER =========
+@app.on_message(filters.command("help"))
+async def help_cmd(_, msg):
+    await msg.reply_text(
+        "**Commands List**\n"
+        "/start - Start bot\n"
+        "/setprofile - Create or update your profile\n"
+        "/find - Start finding matches"
+    )
 
-# Bot running
+# ========= RUN =========
 print("🚀 STD Dating Bot is running...")
 app.run()
