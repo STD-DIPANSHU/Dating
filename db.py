@@ -1,85 +1,109 @@
-import json
-import os
+import sqlite3
+import random
 
-DB_FILE = "users.json"
+# Initialize database
+def init_db():
+    conn = sqlite3.connect("dating.db")
+    c = conn.cursor()
 
+    # Users table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            gender TEXT,
+            age INTEGER,
+            bio TEXT,
+            photo TEXT
+        )
+    """)
 
-# Load database from file
-def load_db():
-    if not os.path.exists(DB_FILE):
-        return {}
-    with open(DB_FILE, "r") as f:
-        return json.load(f)
+    # Likes table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS likes (
+            liker_id INTEGER,
+            liked_id INTEGER
+        )
+    """)
 
+    conn.commit()
+    conn.close()
 
-# Save database to file
-def save_db(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+# Save new user
+def save_user(user_id, name, gender, age, bio, photo):
+    conn = sqlite3.connect("dating.db")
+    c = conn.cursor()
 
+    c.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+    if c.fetchone():
+        c.execute("""
+            UPDATE users SET name=?, gender=?, age=?, bio=?, photo=? WHERE id=?
+        """, (name, gender, age, bio, photo, user_id))
+    else:
+        c.execute("""
+            INSERT INTO users (id, name, gender, age, bio, photo)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (user_id, name, gender, age, bio, photo))
 
-# Get user info
+    conn.commit()
+    conn.close()
+
+# Get user by ID
 def get_user(user_id):
-    data = load_db()
-    user_id = str(user_id)
-    return data.get(user_id)
-
-
-# Save or update user
-def save_user(user_id, info=None, step=None):
-    data = load_db()
-    user_id = str(user_id)
-
-    if user_id not in data:
-        data[user_id] = {"id": user_id}
-
-    if step:
-        data[user_id]["step"] = step
-    if isinstance(info, dict):
-        data[user_id].update(info)
-
-    save_db(data)
-
-
-# Like system
-def like_user(from_id, to_id, check_only=False):
-    data = load_db()
-    from_id, to_id = str(from_id), str(to_id)
-
-    if from_id not in data:
-        return False
-
-    if "likes" not in data[from_id]:
-        data[from_id]["likes"] = []
-
-    # Check mutual like
-    if check_only:
-        return "likes" in data[to_id] and from_id in data[to_id]["likes"]
-
-    if to_id in data[from_id]["likes"]:
-        return False
-
-    data[from_id]["likes"].append(to_id)
-    save_db(data)
-    return True
-
-
-# Find potential match
-def find_match(user_id):
-    data = load_db()
-    user_id = str(user_id)
-
-    if user_id not in data:
+    conn = sqlite3.connect("dating.db")
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
         return None
+    return {
+        "id": row[0],
+        "name": row[1],
+        "gender": row[2],
+        "age": row[3],
+        "bio": row[4],
+        "photo": row[5]
+    }
 
-    user = data[user_id]
+# Get random user (not same, not already liked)
+def get_random_user(current_user_id):
+    conn = sqlite3.connect("dating.db")
+    c = conn.cursor()
+    c.execute("""
+        SELECT * FROM users 
+        WHERE id != ? AND id NOT IN (SELECT liked_id FROM likes WHERE liker_id = ?)
+        ORDER BY RANDOM() LIMIT 1
+    """, (current_user_id, current_user_id))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "name": row[1],
+        "gender": row[2],
+        "age": row[3],
+        "bio": row[4],
+        "photo": row[5]
+    }
 
-    for uid, info in data.items():
-        if uid == user_id:
-            continue
-        if info.get("step") == "done":
-            # Skip already matched
-            if "likes" in info and user_id in info["likes"]:
-                continue
-            return uid
-    return None
+# Save like
+def like_user(liker_id, liked_id):
+    conn = sqlite3.connect("dating.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO likes (liker_id, liked_id) VALUES (?, ?)", (liker_id, liked_id))
+    conn.commit()
+    conn.close()
+
+# Check mutual like (match)
+def is_match(user1, user2):
+    conn = sqlite3.connect("dating.db")
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM likes WHERE liker_id=? AND liked_id=?", (user2, user1))
+    match = c.fetchone()
+    conn.close()
+    return bool(match)
+
+# Initialize database when file runs
+init_db()
