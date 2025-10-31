@@ -114,7 +114,7 @@ async def start_cmd(client: Client, message: Message):
 async def cb_create_profile(_, query: CallbackQuery):
     uid = query.from_user.id
     start_session(uid)
-    await query.message.reply_text("What's your *name*?", parse_mode="markdown")
+    await query.message.reply_text("What's your *name*?", parse_mode="MarkdownV2")
     await query.answer()
 
 # ---------------- Message router (profile creation, edits & chat) ----------------
