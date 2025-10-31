@@ -1,4 +1,5 @@
 pyrogram==2.0.106
 tgcrypto
-pymongo[srv]
+pymongo[srv]==4.10.1
 dnspython
+python-dotenv
