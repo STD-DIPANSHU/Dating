@@ -3,228 +3,227 @@ import asyncio
 from typing import Dict, Any, List, Optional
 
 from pyrogram import Client, filters
-from pyrogram.types import (
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    Message,
-    CallbackQuery
-)
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 
 from db import (
     save_user, get_user, update_user_partial,
     find_random_profile, like_user, check_match,
-    list_who_liked_me, record_who_liked
+    list_who_liked_me, record_who_liked,
+    record_report, block_user, is_blocked,
+    record_rating, get_average_rating
 )
 
-# -------------------------
-# Config from env
-# -------------------------
+# env
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 if not all([API_ID, API_HASH, BOT_TOKEN]):
-    raise RuntimeError("Please set API_ID, API_HASH and BOT_TOKEN env vars")
+    raise RuntimeError("Set API_ID, API_HASH, BOT_TOKEN env vars")
 
 app = Client("std_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# In-memory sessions (reset on restart)
+# sessions in-memory
 sessions: Dict[int, Dict[str, Any]] = {}
-# active anonymous chats: user_id -> partner_id
+# active anonymous chats
 active_chats: Dict[int, int] = {}
+# pending rating prompts: user_id -> partner_id (after chat ended)
+pending_ratings: Dict[int, int] = {}
 
-# -------------------------
-# Keyboards / UI helpers
-# -------------------------
-def kb_start():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Create a profile", callback_data="create_profile")]
-    ])
+# local fallback welcome image (put start.jpg in repo root) - optional
+WELCOME_IMAGE = "start.jpg" if os.path.exists("start.jpg") else None
 
-def main_menu_kb():
+# ---------------- Keyboards ----------------
+def start_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Create profile 👤", callback_data="create_profile")]])
+
+def main_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 View profiles", callback_data="search_profiles"),
-         InlineKeyboardButton("👤 My profile", callback_data="my_profile")],
+        [InlineKeyboardButton("🔍 Search profiles", callback_data="search")],
+        [InlineKeyboardButton("👤 My profile", callback_data="my_profile")],
         [InlineKeyboardButton("💌 Who liked me", callback_data="who_liked"),
-         InlineKeyboardButton("✏️ Edit profile", callback_data="edit_profile")],
-        [InlineKeyboardButton("📨 Invite friends", switch_inline_query="")]
+         InlineKeyboardButton("✏️ Edit profile", callback_data="edit_profile")]
     ])
 
-def search_buttons(user_oid):
-    # user_oid can be Mongo stored id or int
+def search_kb(target_user_id: int):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("❤️", callback_data=f"like:{user_oid}"),
-            InlineKeyboardButton("💌", callback_data=f"message:{user_oid}"),
-            InlineKeyboardButton("👎", callback_data=f"dislike:{user_oid}")
+            InlineKeyboardButton("❤️ Like", callback_data=f"like:{target_user_id}"),
+            InlineKeyboardButton("💔 Dislike", callback_data=f"dislike:{target_user_id}"),
+            InlineKeyboardButton("🚫 Report", callback_data=f"report_menu:{target_user_id}")
         ],
         [
-            InlineKeyboardButton("🔁 Next", callback_data="search_profiles")
+            InlineKeyboardButton("🔁 Next", callback_data="search")
         ]
     ])
 
-def photos_actions_kb():
+def report_reasons_kb(target_user_id: int):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("That's it, keep the photo", callback_data="photos:done")]
+        [InlineKeyboardButton("Fake profile", callback_data=f"report:{target_user_id}:fake")],
+        [InlineKeyboardButton("Spam", callback_data=f"report:{target_user_id}:spam")],
+        [InlineKeyboardButton("Abuse / Harassment", callback_data=f"report:{target_user_id}:abuse")]
     ])
 
-def edit_menu_kb():
+def post_match_kb(target_user_id: int):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Name", callback_data="edit:name"),
-         InlineKeyboardButton("Gender", callback_data="edit:gender")],
-        [InlineKeyboardButton("Preference", callback_data="edit:preference"),
-         InlineKeyboardButton("City", callback_data="edit:city")],
-        [InlineKeyboardButton("Age", callback_data="edit:age"),
-         InlineKeyboardButton("Photos", callback_data="edit:photos")],
-        [InlineKeyboardButton("Hobbies", callback_data="edit:hobbies"),
-         InlineKeyboardButton("Bio", callback_data="edit:bio")],
-        [InlineKeyboardButton("Back", callback_data="back_to_menu")]
+        [InlineKeyboardButton("Chat now 💬", callback_data=f"chat:{target_user_id}")],
+        [InlineKeyboardButton("Block 🚫", callback_data=f"block:{target_user_id}")]
     ])
 
-# -------------------------
-# Utilities for sessions
-# -------------------------
-def start_profile_session(user_id: int):
-    sessions[user_id] = {
+def rate_kb(partner_id: int):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐", callback_data=f"rate:{partner_id}:1"),
+         InlineKeyboardButton("⭐⭐", callback_data=f"rate:{partner_id}:2"),
+         InlineKeyboardButton("⭐⭐⭐", callback_data=f"rate:{partner_id}:3")],
+        [InlineKeyboardButton("⭐⭐⭐⭐", callback_data=f"rate:{partner_id}:4"),
+         InlineKeyboardButton("⭐⭐⭐⭐⭐", callback_data=f"rate:{partner_id}:5")]
+    ])
+
+# ---------------- Helpers ----------------
+def start_session(uid: int):
+    sessions[uid] = {
         "stage": "name",
-        "profile": {
-            "photos": [],
-            "hobbies": []
-        }
+        "profile": {"photos": [], "hobbies": []}
     }
 
-def clear_session(user_id: int):
-    sessions.pop(user_id, None)
+def clear_session(uid: int):
+    sessions.pop(uid, None)
 
-def session_exists(user_id: int) -> bool:
-    return user_id in sessions
+def session_get(uid: int) -> Optional[Dict[str, Any]]:
+    return sessions.get(uid)
 
-# -------------------------
-# /start
-# -------------------------
+# ---------------- /start ----------------
 @app.on_message(filters.private & filters.command("start"))
 async def start_cmd(client: Client, message: Message):
     uid = message.from_user.id
     user = get_user(uid)
+    caption = "Welcome to STD Dating Bot — create a profile to start meeting people!"
     if user and user.get("name"):
-        await message.reply_text(
-            f"Hi {user.get('name')} 👋\nWelcome back! Use the menu below.",
-            reply_markup=main_menu_kb()
-        )
-    else:
-        # First-time: show welcome and "Create a profile"
-        await message.reply_photo(
-            photo="https://i.ibb.co/QMHKxSk/default-profile.jpg",
-            caption="Hi! 👋\nWelcome to our dating bot!\nTo get started, create your profile — it's quick and easy.",
-            reply_markup=kb_start()
-        )
+        await message.reply_text(f"Welcome back {user.get('name')}!", reply_markup=main_kb())
+        return
+    # show welcome photo if available
+    if WELCOME_IMAGE:
+        try:
+            await message.reply_photo(WELCOME_IMAGE, caption=caption, reply_markup=start_kb())
+            return
+        except Exception:
+            pass
+    await message.reply_text(caption, reply_markup=start_kb())
 
-# -------------------------
-# Create profile button
-# -------------------------
+# ---------------- Create profile button ----------------
 @app.on_callback_query(filters.regex("^create_profile$"))
-async def cb_create_profile(client: Client, query: CallbackQuery):
+async def cb_create_profile(_, query: CallbackQuery):
     uid = query.from_user.id
-    start_profile_session(uid)
-    await query.message.reply_text("What's your name? ✍️")
+    start_session(uid)
+    await query.message.reply_text("What's your *name*?", parse_mode="markdown")
     await query.answer()
 
-# -------------------------
-# Message router: handles profile creation, edits and anonymous chat messages
-# -------------------------
-@app.on_message(filters.private & ~filters.command(["start", "end"]))
+# ---------------- Message router (profile creation, edits & chat) ----------------
+@app.on_message(filters.private & ~filters.command(["start","end"]))
 async def message_router(client: Client, message: Message):
     uid = message.from_user.id
 
-    # 1) If in anonymous chat -> relay
+    # 1) If user in anonymous chat -> relay
     if uid in active_chats:
         partner = active_chats.get(uid)
         if not partner:
-            await message.reply_text("Your partner is not available.")
+            await message.reply_text("Your partner is unavailable.")
             return
-        # relay text/photo
+        # blocked check (if partner blocked)
+        if is_blocked(uid, partner) or is_blocked(partner, uid):
+            # end chat
+            active_chats.pop(uid, None)
+            active_chats.pop(partner, None)
+            await message.reply_text("Chat ended because of block.")
+            try:
+                await client.send_message(partner, "Chat ended because of block.")
+            except:
+                pass
+            return
+        # relay text or photo
         if message.text:
             await client.send_message(partner, f"💬 Stranger: {message.text}")
         elif message.photo:
             await client.send_photo(partner, message.photo.file_id, caption="📷 Stranger sent a photo")
         else:
-            await message.reply_text("Only text and photos are supported during anonymous chat.")
+            await message.reply_text("Only text and photos are relayed in anonymous chat.")
         return
 
-    # 2) If user in session (creating or editing)
-    if session_exists(uid):
-        session = sessions[uid]
-        stage = session["stage"]
+    # 2) If in session (profile creation or editing)
+    sess = session_get(uid)
+    if sess:
+        stage = sess["stage"]
+        prof = sess["profile"]
 
-        # NAME
+        # name
         if stage == "name":
-            session["profile"]["name"] = message.text.strip()
-            session["stage"] = "gender"
-            await message.reply_text("State your gender 👥 (Boy / Girl / Other)")
+            prof["name"] = (message.text or "").strip()
+            sess["stage"] = "gender"
+            await message.reply_text("What's your gender? (Boy/Girl/Other)")
 
-        # GENDER
+        # gender
         elif stage == "gender":
-            g = message.text.strip().title()
+            g = (message.text or "").strip().title()
             if g not in ["Boy", "Girl", "Other"]:
-                await message.reply_text("Please reply with Boy, Girl, or Other.")
+                await message.reply_text("Reply with Boy / Girl / Other.")
                 return
-            session["profile"]["gender"] = g
-            session["stage"] = "preference"
-            await message.reply_text("Pick who you're looking for 💕 (Boys / Girls / Everyone)")
+            prof["gender"] = g
+            sess["stage"] = "preference"
+            await message.reply_text("Who are you looking for? (Boys/Girls/Everyone)")
 
-        # PREFERENCE
+        # preference
         elif stage == "preference":
-            pref = message.text.strip().title()
-            if pref not in ["Boys", "Girls", "Everyone"]:
-                await message.reply_text("Please choose: Boys / Girls / Everyone")
+            p = (message.text or "").strip().title()
+            if p not in ["Boys", "Girls", "Everyone"]:
+                await message.reply_text("Choose Boys / Girls / Everyone")
                 return
-            session["profile"]["preference"] = pref
-            session["stage"] = "city"
-            await message.reply_text("Enter your city 🏙️")
+            prof["preference"] = p
+            sess["stage"] = "city"
+            await message.reply_text("Which city are you from?")
 
-        # CITY
+        # city
         elif stage == "city":
-            session["profile"]["city"] = message.text.strip()
-            session["stage"] = "age"
-            await message.reply_text("How old are you? 🎂 (number)")
+            prof["city"] = (message.text or "").strip()
+            sess["stage"] = "age"
+            await message.reply_text("How old are you? (number)")
 
-        # AGE
+        # age
         elif stage == "age":
-            if not message.text.isdigit():
-                await message.reply_text("Please enter a valid number for age.")
+            if not (message.text and message.text.isdigit()):
+                await message.reply_text("Send a valid number for age.")
                 return
-            age = int(message.text)
-            session["profile"]["age"] = age
-            session["stage"] = "photos"
-            await message.reply_text("Upload your photo(s). You can send up to 3 photos. Send first photo now.")
-            await message.reply_text("You can also send multiple at once; after sending press 'That's it, keep the photo' button.", reply_markup=photos_actions_kb())
+            prof["age"] = int(message.text)
+            sess["stage"] = "photos"
+            await message.reply_text("Send up to 3 photos. Send first photo now. When done press \"That's it\".")
+            # show the photos done button
+            await message.reply_text("When finished press:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("That's it, keep the photo", callback_data="photos:done")]]))
 
-        # HOBBIES
+        # hobbies
         elif stage == "hobbies":
-            # accept comma-separated or single
+            if not message.text:
+                await message.reply_text("Send 1-3 hobbies (comma separated or one per message).")
+                return
             parts = [p.strip() for p in message.text.split(",") if p.strip()]
-            existing = session["profile"].get("hobbies", [])
+            existing = prof.get("hobbies", [])
             for p in parts:
                 if len(existing) < 3:
                     existing.append(p)
-            session["profile"]["hobbies"] = existing
+            prof["hobbies"] = existing
             if len(existing) >= 3:
-                session["stage"] = "bio"
-                await message.reply_text("Tell us a little about yourself – one line bio 📝")
+                sess["stage"] = "bio"
+                await message.reply_text("Write a short one-line bio about yourself.")
             else:
-                await message.reply_text(f"Added. {len(existing)}/3 hobbies collected. Send more or comma-separated list.")
+                await message.reply_text(f"Saved {len(existing)}/3 hobbies. Send more or comma-separated list.")
 
-        # BIO
+        # bio
         elif stage == "bio":
-            session["profile"]["bio"] = message.text.strip()
-            # finalize: require photos & hobbies length
-            prof = session["profile"]
+            prof["bio"] = (message.text or "").strip()
+            # finalize - ensure we have at least 1 photo and up to 3 hobbies
             photos = prof.get("photos", [])
-            hobbies = prof.get("hobbies", [])
             if len(photos) < 1:
-                await message.reply_text("You must upload at least 1 photo. Please send photos now.")
-                session["stage"] = "photos"
+                sess["stage"] = "photos"
+                await message.reply_text("You need to upload at least one photo. Send photos now.")
                 return
-            # Save to DB (db.save_user should accept photos list)
+            # persist to DB
             save_user(uid,
                       prof.get("name"),
                       prof.get("gender"),
@@ -235,56 +234,42 @@ async def message_router(client: Client, message: Message):
                       prof.get("preference"),
                       prof.get("hobbies"))
             clear_session(uid)
-            await message.reply_text("Great! Your profile is ready — now you can search for interesting people.", reply_markup=main_menu_kb())
-        else:
-            await message.reply_text("Unexpected stage. Use /start to create profile.")
+            await message.reply_text("✅ Profile saved!", reply_markup=main_kb())
         return
 
-    # 3) Not in session and not in chat -> regular message (help)
-    await message.reply_text("Use /start to begin or use the menu. Use /end to stop an anonymous chat.")
+    # 3) Not in session and not in chat: ignore or direct to menu
+    await message.reply_text("Use /start to create profile or use the menu buttons.", reply_markup=main_kb())
 
-# -------------------------
-# Photo handler for session
-# -------------------------
+# ---------------- Photo handler (session) ----------------
 @app.on_message(filters.photo & filters.private)
-async def photo_receiver(client: Client, message: Message):
+async def photo_handler(client: Client, message: Message):
     uid = message.from_user.id
-    if not session_exists(uid):
-        await message.reply_text("Not expecting photos now. Use Create a profile to start.")
+    sess = session_get(uid)
+    if not sess or sess["stage"] != "photos":
+        await message.reply_text("Not expecting a photo now. Use Create profile first.")
         return
-    session = sessions[uid]
-    if session["stage"] != "photos":
-        await message.reply_text("Not expecting photo at this moment.")
-        return
-    photos: List[str] = session["profile"].get("photos", [])
+    prof = sess["profile"]
+    photos: List[str] = prof.get("photos", [])
     fid = message.photo.file_id
-    photos.append(fid)
-    # keep max 3
-    if len(photos) > 3:
-        photos = photos[:3]
-    session["profile"]["photos"] = photos
-    session["profile"]["photos_count"] = len(photos)
-    await message.reply_text(f"📸 Photo {len(photos)}/3 uploaded!\nYou can upload more or press 'That's it, keep the photo'.", reply_markup=photos_actions_kb())
+    if fid not in photos:
+        photos.append(fid)
+    prof["photos"] = photos[:3]
+    await message.reply_text(f"Photo received ({len(photos)}/3). Send more or press \"That's it\".", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("That's it, keep the photo", callback_data="photos:done")]]))
 
-# -------------------------
-# Photos: done callback
-# -------------------------
+# ---------------- photos done callback ----------------
 @app.on_callback_query(filters.regex("^photos:done$"))
 async def photos_done_cb(client: Client, query: CallbackQuery):
     uid = query.from_user.id
-    if not session_exists(uid):
-        await query.answer("No photo session found.")
+    if not session_get(uid):
+        await query.answer("No active photo session.")
         return
-    session = sessions[uid]
-    # move to hobbies
+    session = session_get(uid)
     session["stage"] = "hobbies"
-    await query.message.reply_text("Tell us a little about yourself - it will help others get to know you better! 📝\n(You will be asked to add 3 hobbies)")
+    await query.message.reply_text("Now send your 3 hobbies (comma separated or one per message).")
     await query.answer()
 
-# -------------------------
-# Main menu callbacks: search / my profile / edit / who liked
-# -------------------------
-@app.on_callback_query(filters.regex("^(search_profiles|my_profile|edit_profile|who_liked)$"))
+# ---------------- main menu callbacks ----------------
+@app.on_callback_query(filters.regex("^(search|my_profile|who_liked|edit_profile)$"))
 async def menu_cb(client: Client, query: CallbackQuery):
     uid = query.from_user.id
     action = query.data
@@ -296,8 +281,7 @@ async def menu_cb(client: Client, query: CallbackQuery):
             await query.answer()
             return
         photos = user.get("photos", [])
-        caption = (f"{user.get('name')}, {user.get('age')} — {user.get('city')}\n"
-                   f"{user.get('bio')}\n\nHobbies: {', '.join(user.get('hobbies',[])[:3])}")
+        caption = f"{user.get('name','')}, {user.get('age','')} — {user.get('city','')}\n\n{user.get('bio','')}\n\nHobbies: {', '.join(user.get('hobbies',[])[:3])}\n\nRating: {get_average_rating(uid):.2f}/5"
         if photos:
             await client.send_photo(uid, photos[0], caption=caption)
         else:
@@ -319,188 +303,165 @@ async def menu_cb(client: Client, query: CallbackQuery):
     if action == "edit_profile":
         user = get_user(uid)
         if not user:
-            await query.message.reply_text("You don't have a profile yet. Create one.")
+            await query.message.reply_text("Create profile first.")
             await query.answer()
             return
-        await query.message.reply_text("Choose field to edit:", reply_markup=edit_menu_kb())
+        await query.message.reply_text("Choose field to edit:", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Name", callback_data="edit:name"),
+             InlineKeyboardButton("Gender", callback_data="edit:gender")],
+            [InlineKeyboardButton("Age", callback_data="edit:age"),
+             InlineKeyboardButton("Photos", callback_data="edit:photos")],
+            [InlineKeyboardButton("Hobbies", callback_data="edit:hobbies"),
+             InlineKeyboardButton("Bio", callback_data="edit:bio")]
+        ]))
         await query.answer()
         return
 
-    if action == "search_profiles":
-        # show one random candidate
+    if action == "search":
+        # show a candidate
         candidate = find_random_profile(uid)
         if not candidate:
-            await query.message.reply_text("No profiles found right now. Try again later.")
+            await query.message.reply_text("No profiles available right now.")
             await query.answer()
             return
-        # Build caption
-        name = candidate.get("name", "User")
-        age = candidate.get("age", "")
-        city = candidate.get("city", "")
-        bio = candidate.get("bio", "")
-        hobbies = candidate.get("hobbies", [])
-        caption = f"{name}, {age}, {city}\n\n{bio}\n\n{ ' // '.join(hobbies[:3]) }"
+        # check blocks: find_random_profile already filters blocks, but double-check
+        if is_blocked(uid, candidate.get("user_id")) or is_blocked(candidate.get("user_id"), uid):
+            await query.answer()
+            return
+        caption = f"💫 {candidate.get('name','')}, {candidate.get('age','')} — {candidate.get('city','')}\n\n{candidate.get('bio','')}\n\nHobbies: {', '.join(candidate.get('hobbies',[])[:3])}\n\nRating: {get_average_rating(candidate.get('user_id')):.2f}/5"
         photos = candidate.get("photos", [])
         first = photos[0] if photos else None
-        # candidate's id key in db is user_id
-        candidate_id = candidate.get("user_id")
+        tid = candidate.get("user_id")
         if first:
-            await client.send_photo(uid, first, caption=caption, reply_markup=search_buttons(candidate_id))
+            await client.send_photo(uid, first, caption=caption, reply_markup=search_kb(tid))
         else:
-            await client.send_message(uid, caption, reply_markup=search_buttons(candidate_id))
+            await client.send_message(uid, caption, reply_markup=search_kb(tid))
         await query.answer()
         return
 
-# -------------------------
-# Action buttons (like/dislike/message/next)
-# -------------------------
-@app.on_callback_query(filters.regex("^(like:|dislike:|message:|search_profiles|next_profile)$"))
+# ---------------- action callbacks (like/dislike/report/block/rate) ----------------
+@app.on_callback_query(filters.regex("^(like:|dislike:|report_menu:|report:|block:|chat:|rate:)"))
 async def action_cb(client: Client, query: CallbackQuery):
     uid = query.from_user.id
     data = query.data
 
+    # report menu
+    if data.startswith("report_menu:"):
+        target = int(data.split(":",1)[1])
+        await query.message.reply_text("Choose reason:", reply_markup=report_reasons_kb(target))
+        await query.answer()
+        return
+
+    # report submission
+    if data.startswith("report:"):
+        parts = data.split(":")
+        target = int(parts[1])
+        reason = parts[2]
+        record_report(uid, target, reason)
+        await query.message.reply_text("Thanks — report submitted. We'll review this profile.")
+        await query.answer()
+        return
+
+    # like
     if data.startswith("like:"):
-        target_id = int(data.split(":",1)[1])
-        # record like
-        like_user(uid, target_id)
-        # keep reverse record for "who liked"
-        record_who_liked(target_id, uid)
-        # check match
-        if check_match(uid, target_id):
-            # create anonymous mapping both ways
-            active_chats[uid] = target_id
-            active_chats[target_id] = uid
-            await client.send_message(uid, "💞 It's a MATCH! 🎉 Anonymous chat started. Type messages here. Use /end to stop.")
+        target = int(data.split(":",1)[1])
+        # check blocks
+        if is_blocked(uid, target) or is_blocked(target, uid):
+            await query.message.reply_text("Cannot like user (blocked).")
+            await query.answer()
+            return
+        like_user(uid, target)
+        record_who_liked(target, uid)
+        if check_match(uid, target):
+            # create anonymous chat
+            active_chats[uid] = target
+            active_chats[target] = uid
+            # notify both
+            await client.send_message(uid, "💞 It's a MATCH! Anonymous chat started. Chat here. Use /end to stop.")
             try:
-                await client.send_message(target_id, "💞 It's a MATCH! 🎉 Anonymous chat started. Type messages here. Use /end to stop.")
-            except Exception:
+                await client.send_message(target, "💞 It's a MATCH! Anonymous chat started. Chat here. Use /end to stop.")
+            except:
                 pass
+            await query.answer("Match!")
+            return
         else:
             await query.message.reply_text("Liked! We'll notify if it's mutual.")
-        await query.answer()
-        # show next candidate
-        await client.delete_messages(uid, query.message.message_id)
-        await menu_cb(client, CallbackQuery._factory(client, query.message, "search_profiles", query.from_user))
-        return
-
-    if data.startswith("dislike:"):
-        # just skip and show next
-        await query.answer("Disliked.")
-        await client.delete_messages(uid, query.message.message_id)
-        await menu_cb(client, CallbackQuery._factory(client, query.message, "search_profiles", query.from_user))
-        return
-
-    if data.startswith("message:"):
-        # user pressed the 'message' button — we will simulate "send interest" (optional)
-        target_id = int(data.split(":",1)[1])
-        try:
-            await client.send_message(target_id, "💌 Someone showed interest in your profile!")
-        except Exception:
-            pass
-        await query.answer("Message sent.")
-        return
-
-    if data in ("search_profiles", "next_profile"):
-        # call search
-        await menu_cb(client, query._replace(data="search_profiles"))
-        await query.answer()
-        return
-
-# -------------------------
-# Edit field flow: choose field and accept new value
-# -------------------------
-@app.on_callback_query(filters.regex("^edit:"))
-async def edit_field_cb(client: Client, query: CallbackQuery):
-    uid = query.from_user.id
-    field = query.data.split(":",1)[1]
-    # start session for edit
-    sessions[uid] = {"stage": f"edit_{field}", "profile": {}}
-    await query.message.reply_text(f"Send new value for *{field}* now.", parse_mode="Markdown")
-    await query.answer()
-
-# accept edit values (text or photos)
-@app.on_message(filters.private & ~filters.command(["start","end"]))
-async def edit_value_handler(client: Client, message: Message):
-    uid = message.from_user.id
-    if uid not in sessions:
-        return
-    session = sessions[uid]
-    stage = session.get("stage","")
-    if stage.startswith("edit_"):
-        field = stage.replace("edit_","")
-        # photos special
-        if field == "photos":
-            # accept photos
-            if not message.photo:
-                await message.reply_text("Send photos to update (3 recommended).")
-                return
-            # collect photos until 3 then save
-            photos = session["profile"].get("photos", [])
-            photos.append(message.photo.file_id)
-            session["profile"]["photos"] = photos
-            if len(photos) >= 3:
-                # fetch existing user to preserve other fields
-                user = get_user(uid) or {}
-                save_user(uid,
-                          user.get("name"),
-                          user.get("gender"),
-                          user.get("age"),
-                          user.get("bio"),
-                          photos,
-                          user.get("city"),
-                          user.get("preference"),
-                          user.get("hobbies"))
-                sessions.pop(uid, None)
-                await message.reply_text("Photos updated.", reply_markup=main_menu_kb())
-            else:
-                await message.reply_text(f"Photo received ({len(photos)}/3). Send more or press 'That's it' button.")
+            await query.answer()
+            # show next
+            await client.delete_messages(uid, query.message.message_id)
+            await menu_cb(client, query._replace(data="search"))
             return
-        # other fields: simply update
-        value = message.text.strip()
-        user = get_user(uid) or {}
-        # map to db save
-        if field == "name":
-            save_user(uid, value, user.get("gender"), user.get("age"), user.get("bio"), user.get("photos"), user.get("city"), user.get("preference"), user.get("hobbies"))
-        elif field == "gender":
-            save_user(uid, user.get("name"), value, user.get("age"), user.get("bio"), user.get("photos"), user.get("city"), user.get("preference"), user.get("hobbies"))
-        elif field == "age":
-            try:
-                age = int(value)
-            except:
-                await message.reply_text("Please send a valid number for age.")
-                return
-            save_user(uid, user.get("name"), user.get("gender"), age, user.get("bio"), user.get("photos"), user.get("city"), user.get("preference"), user.get("hobbies"))
-        elif field == "hobbies":
-            parts = [p.strip() for p in value.split(",") if p.strip()]
-            save_user(uid, user.get("name"), user.get("gender"), user.get("age"), user.get("bio"), user.get("photos"), user.get("city"), user.get("preference"), parts[:3])
-        elif field == "bio":
-            save_user(uid, user.get("name"), user.get("gender"), user.get("age"), value, user.get("photos"), user.get("city"), user.get("preference"), user.get("hobbies"))
-        elif field == "city":
-            save_user(uid, user.get("name"), user.get("gender"), user.get("age"), user.get("bio"), user.get("photos"), value, user.get("preference"), user.get("hobbies"))
-        sessions.pop(uid, None)
-        await message.reply_text(f"{field.capitalize()} updated.", reply_markup=main_menu_kb())
 
-# -------------------------
-# /end command to stop anonymous chat
-# -------------------------
-@app.on_message(filters.private & filters.command("end"))
-async def end_cmd(client: Client, message: Message):
-    uid = message.from_user.id
-    partner = active_chats.pop(uid, None)
-    if partner:
-        # remove reciprocal
-        active_chats.pop(partner, None)
-        await message.reply_text("You ended the anonymous chat.")
+    # dislike -> skip
+    if data.startswith("dislike:"):
+        await query.answer("Skipped.")
+        await client.delete_messages(uid, query.message.message_id)
+        await menu_cb(client, query._replace(data="search"))
+        return
+
+    # block
+    if data.startswith("block:"):
+        target = int(data.split(":",1)[1])
+        block_user(uid, target)
+        # end active chat if any
+        if active_chats.get(uid) == target:
+            active_chats.pop(uid, None)
+            active_chats.pop(target, None)
+            # prompt rating for partner
+            pending_ratings[target] = None  # partner won't rate because they were blocked
+        await query.message.reply_text("User blocked. They won't appear for you anymore.")
+        await query.answer()
+        return
+
+    # chat (optional direct invite)
+    if data.startswith("chat:"):
+        target = int(data.split(":",1)[1])
+        # we don't reveal identities: just send a ping
         try:
-            await client.send_message(partner, "The other user ended the anonymous chat.")
+            await client.send_message(target, "💌 Someone is interested in your profile!")
         except:
             pass
-    else:
-        await message.reply_text("You don't have an active anonymous chat.")
+        await query.answer("Notification sent.")
 
-# -------------------------
-# Run
-# -------------------------
+    # rating
+    if data.startswith("rate:"):
+        parts = data.split(":")
+        target = int(parts[1])
+        rating = int(parts[2])
+        record_rating(uid, target, rating)
+        await query.message.reply_text(f"Thanks! You rated the chat partner {rating}⭐")
+        await query.answer()
+        # remove pending if present
+        pending_ratings.pop(uid, None)
+        return
+
+# ---------------- /end - stop anonymous chat & prompt rating ----------------
+@app.on_message(filters.private & filters.command("end"))
+async def end_chat_cmd(client: Client, message: Message):
+    uid = message.from_user.id
+    partner = active_chats.pop(uid, None)
+    if not partner:
+        await message.reply_text("You don't have an active anonymous chat.")
+        return
+    # remove partner's mapping if present
+    active_chats.pop(partner, None)
+    await message.reply_text("You ended the anonymous chat. Please rate your partner:", reply_markup=rate_kb(partner))
+    try:
+        await client.send_message(partner, "The other user ended the chat. Please rate them:", reply_markup=rate_kb(uid))
+    except:
+        pass
+    # store pending in case they don't press rate but we still want to show later
+    pending_ratings[uid] = partner
+    pending_ratings[partner] = uid
+
+# ---------------- utility command: /whoami (debug) ----------------
+@app.on_message(filters.private & filters.command("whoami"))
+async def whoami_cmd(_, message: Message):
+    uid = message.from_user.id
+    user = get_user(uid)
+    await message.reply_text(str(user))
+
+# ---------------- start the bot ----------------
 if __name__ == "__main__":
-    print("🚀 STD Dating Bot starting (Pyrogram + MongoDB)")
+    print("🚀 STD Dating Bot (full features) starting...")
     app.run()
