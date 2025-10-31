@@ -1,109 +1,67 @@
-import sqlite3
+from pymongo import MongoClient
 import random
+import os
 
-# Initialize database
-def init_db():
-    conn = sqlite3.connect("dating.db")
-    c = conn.cursor()
+# Connect to MongoDB
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://<username>:<password>@<cluster-url>/")  # replace with your real URI
+client = MongoClient(MONGO_URI)
+db = client["dating_bot"]
 
-    # Users table
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            name TEXT,
-            gender TEXT,
-            age INTEGER,
-            bio TEXT,
-            photo TEXT
-        )
-    """)
+users = db["users"]
+likes = db["likes"]
 
-    # Likes table
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS likes (
-            liker_id INTEGER,
-            liked_id INTEGER
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-# Save new user
+# Save or update user profile
 def save_user(user_id, name, gender, age, bio, photo):
-    conn = sqlite3.connect("dating.db")
-    c = conn.cursor()
-
-    c.execute("SELECT id FROM users WHERE id = ?", (user_id,))
-    if c.fetchone():
-        c.execute("""
-            UPDATE users SET name=?, gender=?, age=?, bio=?, photo=? WHERE id=?
-        """, (name, gender, age, bio, photo, user_id))
-    else:
-        c.execute("""
-            INSERT INTO users (id, name, gender, age, bio, photo)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (user_id, name, gender, age, bio, photo))
-
-    conn.commit()
-    conn.close()
+    users.update_one(
+        {"_id": user_id},
+        {"$set": {
+            "name": name,
+            "gender": gender,
+            "age": age,
+            "bio": bio,
+            "photo": photo
+        }},
+        upsert=True
+    )
 
 # Get user by ID
 def get_user(user_id):
-    conn = sqlite3.connect("dating.db")
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    if not row:
+    user = users.find_one({"_id": user_id})
+    if not user:
         return None
     return {
-        "id": row[0],
-        "name": row[1],
-        "gender": row[2],
-        "age": row[3],
-        "bio": row[4],
-        "photo": row[5]
+        "id": user["_id"],
+        "name": user.get("name"),
+        "gender": user.get("gender"),
+        "age": user.get("age"),
+        "bio": user.get("bio"),
+        "photo": user.get("photo")
     }
 
 # Get random user (not same, not already liked)
 def get_random_user(current_user_id):
-    conn = sqlite3.connect("dating.db")
-    c = conn.cursor()
-    c.execute("""
-        SELECT * FROM users 
-        WHERE id != ? AND id NOT IN (SELECT liked_id FROM likes WHERE liker_id = ?)
-        ORDER BY RANDOM() LIMIT 1
-    """, (current_user_id, current_user_id))
-    row = c.fetchone()
-    conn.close()
-    if not row:
+    liked_ids = [l["liked_id"] for l in likes.find({"liker_id": current_user_id})]
+    pipeline = [
+        {"$match": {"_id": {"$ne": current_user_id, "$nin": liked_ids}}},
+        {"$sample": {"size": 1}}
+    ]
+    result = list(users.aggregate(pipeline))
+    if not result:
         return None
+    user = result[0]
     return {
-        "id": row[0],
-        "name": row[1],
-        "gender": row[2],
-        "age": row[3],
-        "bio": row[4],
-        "photo": row[5]
+        "id": user["_id"],
+        "name": user.get("name"),
+        "gender": user.get("gender"),
+        "age": user.get("age"),
+        "bio": user.get("bio"),
+        "photo": user.get("photo")
     }
 
-# Save like
+# Like another user
 def like_user(liker_id, liked_id):
-    conn = sqlite3.connect("dating.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO likes (liker_id, liked_id) VALUES (?, ?)", (liker_id, liked_id))
-    conn.commit()
-    conn.close()
+    likes.insert_one({"liker_id": liker_id, "liked_id": liked_id})
 
-# Check mutual like (match)
+# Check if match exists
 def is_match(user1, user2):
-    conn = sqlite3.connect("dating.db")
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM likes WHERE liker_id=? AND liked_id=?", (user2, user1))
-    match = c.fetchone()
-    conn.close()
-    return bool(match)
-
-# Initialize database when file runs
-init_db()
+    return likes.find_one({"liker_id": user2, "liked_id": user1}) is not None
