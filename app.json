@@ -1,35 +1,28 @@
 {
-  "name": "STD-Dating-Bot",
-  "description": "An anonymous Telegram dating bot built using Pyrogram.",
+  "name": "STD Dating Bot",
+  "description": "An anonymous Telegram dating bot built using Pyrogram and MongoDB.",
   "repository": "https://github.com/yourusername/std-dating-bot",
-  "keywords": ["telegram", "bot", "pyrogram", "dating", "heroku"],
+  "env": {
+    "API_ID": {
+      "description": "Your Telegram API ID from https://my.telegram.org",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Your Telegram API HASH from https://my.telegram.org",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Your Bot Token from @BotFather",
+      "required": true
+    },
+    "MONGO_URI": {
+      "description": "Your MongoDB connection string (from MongoDB Atlas)",
+      "required": true
+    }
+  },
   "buildpacks": [
     {
       "url": "heroku/python"
     }
-  ],
-  "env": {
-    "API_ID": {
-      "description": "Your Telegram API ID from my.telegram.org",
-      "required": true
-    },
-    "API_HASH": {
-      "description": "Your Telegram API Hash from my.telegram.org",
-      "required": true
-    },
-    "BOT_TOKEN": {
-      "description": "Your Telegram Bot Token from BotFather",
-      "required": true
-    }
-  },
-  "formation": {
-    "web": {
-      "quantity": 1,
-      "size": "basic"
-    }
-  },
-  "addons": [],
-  "scripts": {
-    "postdeploy": "echo 'Bot deployed successfully!'"
-  }
+  ]
 }
