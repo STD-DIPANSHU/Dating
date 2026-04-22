@@ -17,7 +17,7 @@ Aap is bot ko **Heroku** par aasaani se deploy kar sakte hain.
 
 Neeche diye gaye **"Deploy to Heroku"** button par click karein. Yeh aapko Heroku par le jaayega jahan aapko sirf **BOT_TOKEN** aur **MONGO_URI** dalne honge.
 
-[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/STD-DEEPANSHU/Dating)
+[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/STD-DIPANSHU/Dating)
 
 > **IMPORTANT:** Upar diye gaye URL mein `YOUR_GITHUB_USERNAME` aur `YOUR_REPO_NAME` ko apne asal (actual) GitHub username aur Repository name se **zaroor change karein**.
 
